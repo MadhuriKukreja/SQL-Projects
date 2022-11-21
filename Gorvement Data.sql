@@ -1,4 +1,3 @@
-use resume_projects;
 
 --- number of rows --
 
