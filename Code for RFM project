@@ -1,0 +1,134 @@
+--Calculating the Data at an invoice level with total_amount
+with bills as (select InvoiceNo,Round(SUM(Quantity * UnitPrice),2) as amount from `CRM_Project.Customer Segmentation`
+group by 1)
+select * from bills;
+-- Calculating the amount at customer level
+
+
+  select cs.CustomerID,Round(SUM(amount),2) as total from `CRM_Project.Customer Segmentation` as cs
+  left join `CRM_Project.Bills` as ab on cs.InvoiceNo = ab.InvoiceNo
+  group by 1;
+
+---Recency of the customer purchasing
+
+WITH customer_recency as(
+  select cs.CustomerID, Round(SUM(csp.amount),2) as total, Date(max(cs.InvoiceDate)) as last_date from `CRM_Project.Customer Segmentation` as cs
+  left join  `CRM_Project.Bills` as csp on cs.InvoiceNo = csp.InvoiceNo
+  group by 1
+
+)
+select *, Date_DIFF(recent_date, last_date, day) as recency from 
+(
+  select *, max(last_date) over() as recent_date from customer_recency
+);
+
+--- Frequency of Customer
+WITH customer_recency as(
+  select cs.CustomerID, Round(SUM(csp.amount),2) as total, Date(max(cs.InvoiceDate)) as last_date,
+  Date(min(cs.InvoiceDate)) as first_purchase_date,
+  count(distinct cs.InvoiceNo) as num_purchases
+  from `CRM_Project.Customer Segmentation` as cs
+  left join  `CRM_Project.Bills` as csp on cs.InvoiceNo = csp.InvoiceNo
+  group by 1
+
+)
+select *, Date_DIFF(recent_date, last_date, day) as recency, num_purchases/(month_cust) as frequency from 
+(
+  select *, max(last_date) over() as recent_date,
+  date_diff(customer_recency.last_date , customer_recency.first_purchase_date, month)+1 as month_cust from customer_recency
+);
+----Creating the offset of recency, frequency, total
+
+select a.*,
+--All the percentile for total
+b.percentile[offset(20)] as m20,
+b.percentile[offset(40)] as m40,
+b.percentile[offset(60)] as m60,
+b.percentile[offset(80)] as m80,
+b.percentile[offset(100)] as m100,
+-- All percentile for frequency
+c.percentile[offset(20)] as f20,
+c.percentile[offset(40)] as f40,
+c.percentile[offset(60)] as f60,
+c.percentile[offset(80)] as f80,
+c.percentile[offset(100)] as f100,
+-- All the percentile for recency
+d.percentile[offset(20)] as r20,
+d.percentile[offset(40)] as r40,
+d.percentile[offset(60)] as r60,
+d.percentile[offset(80)] as r80,
+d.percentile[offset(100)] as r100,
+from `CRM_Project.RFM` as a,
+(select approx_quantiles(total,100 ) percentile from `CRM_Project.RFM`) as b,
+(select approx_quantiles(frequency,100 ) percentile from `CRM_Project.RFM`) as c,
+(select approx_quantiles(recency,100 ) percentile from `CRM_Project.RFM`) as d;
+
+-- Assigning Scores to Quantiles
+
+select CustomerID, m_score, r_score, f_score, total, recency, frequency, cast(Round((f_score+m_score)/2,0)as int64)as fm_score
+
+  FROM (
+SELECT *,
+CASE WHEN total <= m20 THEN 1
+WHEN total <= m40 AND total > m20 THEN 2
+WHEN total <= m60 AND total > m40 THEN 3
+WHEN total <= m80 AND total > m60 THEN 4
+WHEN total <= m100 AND total > m80 THEN 5
+END AS m_score,
+CASE WHEN frequency <= f20 THEN 1
+WHEN frequency <= f40 AND frequency > f20 THEN 2
+WHEN frequency <= f60 AND frequency > f40 THEN 3
+WHEN frequency <= f80 AND frequency > f60 THEN 4
+WHEN frequency <= f100 AND frequency > f80 THEN 5
+END AS f_score,
+--Recency scoring is reversed
+CASE WHEN recency <= r20 THEN 5
+WHEN recency <= r40 AND recency > r20 THEN 4
+WHEN recency <= r60 AND recency > r40 THEN 3
+WHEN recency <= r80 AND recency > r60 THEN 2
+WHEN recency <= r100 AND recency > r80 THEN 1
+END AS r_score,
+FROM `CRM_Project.Quantiles`
+);
+-- Create Scores
+SELECT
+CustomerID,
+recency,frequency,total,
+r_score, f_score, m_score,
+fm_score,
+CASE WHEN (r_score = 5 AND fm_score = 5)
+OR (r_score = 5 AND fm_score = 4)
+OR (r_score = 4 AND fm_score = 5)
+THEN 'Champions'
+WHEN (r_score = 5 AND fm_score =3)
+OR (r_score = 4 AND fm_score = 4)
+OR (r_score = 3 AND fm_score = 5)
+OR (r_score = 3 AND fm_score = 4)
+THEN 'Loyal Customers'
+WHEN (r_score = 5 AND fm_score = 2)
+OR (r_score = 4 AND fm_score = 2)
+OR (r_score = 3 AND fm_score = 3)
+OR (r_score = 4 AND fm_score = 3)
+THEN 'Potential Loyalists'
+WHEN r_score = 5 AND fm_score = 1 THEN 'Recent Customers'
+WHEN (r_score = 4 AND fm_score = 1)
+OR (r_score = 3 AND fm_score = 1)
+THEN 'Promising'
+WHEN (r_score = 3 AND fm_score = 2)
+OR (r_score = 2 AND fm_score = 3)
+OR (r_score = 2 AND fm_score = 2)
+THEN 'Customers Needing Attention'
+WHEN r_score = 2 AND fm_score = 1 THEN 'About to Sleep'
+WHEN (r_score = 2 AND fm_score = 5)
+OR (r_score = 2 AND fm_score = 4)
+OR (r_score = 1 AND fm_score = 3)
+THEN 'At Risk'
+WHEN (r_score = 1 AND fm_score = 5)
+OR (r_score = 1 AND fm_score = 4)
+THEN 'Cant Lose Them'
+WHEN r_score = 1 AND fm_score = 2 THEN 'Hibernating'
+WHEN r_score = 1 AND fm_score = 1 THEN 'Lost'
+END AS rfm_segment
+FROM `CRM_Project.scores`
+order by CustomerID
+
